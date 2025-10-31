@@ -1,3 +1,4 @@
+#config.yaml
 solver:
   n_samples: 100
   Nstates: 3
@@ -7,14 +8,14 @@ solver:
   lambda: [1.0, 0.9, 1.0]   # λ for S, I, R
   cost_I: 1.0
   cost_lambda: [10.0, 0.0, 0.0]  # penalties for deviation
-  n_maxstep: 200
+  n_maxstep: 500
 
   # --- Graphon settings ---
   # options: constant, powerlaw, star, piecewise
-  graphon_mode: piecewise
+  graphon_mode: powerlaw
 
   #respective parameters
-  g: -0.3              # exponent for powerlaw graphon
+  g: 0.3              # exponent for powerlaw graphon
   hub_threshold: 0.05  # threshold for star graphon: 5% are hub agents
   p: 0.3               # constant graphon value (if used)
 
