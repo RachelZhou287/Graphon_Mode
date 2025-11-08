@@ -1,23 +1,25 @@
 #config.yaml
-solver:
-  n_samples: 100
-  Nstates: 3
-  T: 100
-  Delta_t: 0.1
+
+n_samples: 100
+batch_size: 100    
+valid_size: 200
+Nstates: 3
+T: 100
+Delta_t: 0.05
   # --- policy parameters---
-  lambda: [1.0, 0.9, 1.0]   # λ for S, I, R
-  cost_I: 1.0
-  cost_lambda: [10.0, 0.0, 0.0]  # penalties for deviation
-  n_maxstep: 500
+lambda: [1.0, 0.9, 1.0]   # λ for S, I, R
+cost_I: 1.0
+cost_lambda: [10.0, 0.0, 0.0]  # penalties for deviation
+n_maxstep: 2000
 
   # --- Graphon settings ---
   # options: constant, powerlaw, star, piecewise
-  graphon_mode: powerlaw
+graphon_mode: piecewise
 
   #respective parameters
-  g: 0.3              # exponent for powerlaw graphon
-  hub_threshold: 0.05  # threshold for star graphon: 5% are hub agents
-  p: 0.3               # constant graphon value (if used)
+g: 0.2            # exponent for powerlaw graphon
+hub_threshold: 0.05  # threshold for star graphon: 5% are hub agents
+p: 0.3               # constant graphon value (if used)
 
   # --- Piecewise graphon parameters ---
   #piecewise:
@@ -28,12 +30,12 @@ solver:
       #- [0.8, 0.8, 1.0, 0.8]
       #- [0.7, 0.8, 0.8, 1  ]
   
-  piecewise:
-    groups: [0.4, 0.35, 0.25]
+piecewise:
+    groups: [0.4, 0.2, 0.4]
     connection_matrix:
-      - [1.0, 0.5, 0.2]
-      - [0.5, 1.0, 0.4]
-      - [0.2, 0.4, 1.0]
+        - [0.3, 0.3, 0.3]
+        - [0.3, 1.0, 0.7]
+        - [0.3, 0.7, 1.0]
 
   #piecewise:
     #groups: [0.2, 0.2, 0.2, 0.2, 0.2]   # 5 equal-sized groups
@@ -46,19 +48,19 @@ solver:
 
 
   # --- Epidemic parameters ---
-  beta: 0.2                # infection rate
-  gamma: 0.1               # recovery rate
-  m0: [0.99, 0.01, 0.0]    # initial S, I, R
+beta: [0.2, 0.3, 0.4]                # infection rate
+gamma: 0.1               # recovery rate
+m0: [0.8, 0.1, 0.1]    # initial S, I, R
 
   # --- Neural net settings ---
-  nn_hidden: [100, 50, 50, 50]
-  nn_stdinit: 0.5
+nn_hidden: [100, 50, 50, 50]
+nn_stdinit: 0.5
 
-train:
-  do_train: true
-  epochs: 100
-  learning_rate: 0.001
-  batch_size: 20
+#train:
+do_train: true
+epochs: 100
+#learning_rate: 0.001
+batch_size: 100
 
-output:
-  prefix: fbode_run
+#output:
+prefix: fbode_run
