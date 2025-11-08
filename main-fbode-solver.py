@@ -16,27 +16,26 @@ def main():
     # --- load config.yaml ---
     cfg_path = os.path.join(os.path.dirname(__file__), "config.yaml")
     with open(cfg_path, "r") as f:
-        full_cfg = yaml.safe_load(f)
-    solver_cfg = full_cfg["solver"]
+        cfg = yaml.safe_load(f)
 
     # initial conditions and params
-    batch_size = solver_cfg["n_samples"]
-    T = solver_cfg["T"]
-    m0 = solver_cfg["m0"]
-    beta = solver_cfg["beta"]
-    gamma = solver_cfg["gamma"]
-    g = solver_cfg["g"]
-    Delta_t = solver_cfg["Delta_t"]
+    batch_size = cfg["batch_size"]
+    T = cfg["T"]
+    m0 = cfg["m0"]
+    beta = cfg["beta"]
+    gamma = cfg["gamma"]
+    g = cfg["g"]
+    Delta_t = cfg["Delta_t"]
 
-    lambda1, lambda2, lambda3 = solver_cfg["lambda"]
-    cost_I = solver_cfg["cost_I"]
-    cost_lambda1 = solver_cfg["cost_lambda"][0]
+    lambda1, lambda2, lambda3 = cfg["lambda"]
+    cost_I = cfg["cost_I"]
+    cost_lambda1 = cfg["cost_lambda"][0]
     kappa = 0.0
-    valid_size = full_cfg.get("train", {}).get("batch_size")
-    n_maxstep = solver_cfg.get("n_maxstep")
+    valid_size = cfg["valid_size"]
+    n_maxstep = cfg["n_maxstep"]
 
     # build graphon
-    graphon = build_graphon(solver_cfg)
+    graphon = build_graphon(cfg)
 
     # SAVE DATA (optional, same as before)
     np.savez('data/data_fbodesolver_params.npz',
@@ -56,7 +55,7 @@ def main():
                                        cost_I, cost_lambda1,
                                        g, Delta_t)
     ode_solver = fbodesolver.SolverODE(ode_equation, T, m0, batch_size, valid_size,
-                                       n_maxstep, cfg=solver_cfg, graphon=graphon)
+                                       n_maxstep, cfg=cfg, graphon=graphon)
     ode_solver.train()
 
     np.savez('data/data_fbodesolver_solution_final.npz',
