@@ -24,8 +24,8 @@ class SolverODE:
         self.n_displaystep = 5
         self.n_savetofilestep = 10
         self.stdNN = 1.e-2
-        self.lr_boundaries = [100]
-        self.lr_values = [1e-3, 1e-3]#[1e-2, 1e-2]
+        self.lr_boundaries = [500]
+        self.lr_values = [1e-2, 1e-3] 
         self.activation_fn_choice = tf.nn.sigmoid
 
         self.alpha_I_pop = tf.cast(self.equation.lambda2, tf.float64)
@@ -107,15 +107,20 @@ class SolverODE:
         Xi = tf.tile(ids_col, [1, n])
         Xj = tf.tile(ids_row, [n, 1])
     
-        if self.cfg.get("graphon_mode", "") == "powerlaw":
+        mode = self.cfg.get("graphon_mode", "constant")
+        if mode == "powerlaw":
             g = tf.cast(self.cfg.get("g", 0.3), tf.float64)
             eps = tf.constant(1e-8, tf.float64)
             W = tf.pow(tf.maximum(Xi, eps) * tf.maximum(Xj, eps), g)
+        elif mode == "piecewise":
+            from graphon_utils import build_graphon
+            w_fn = build_graphon(self.cfg)
+            W = w_fn(Xi, Xj)
         else:
-            W = tf.cast(self.graphon(Xi, Xj), tf.float64)    
-        # global scaling 1/N, N=n_samples
-        W = W / tf.cast(n, tf.float64)
+            p = tf.cast(self.cfg.get("p", 1.0), tf.float64)
+            W = tf.fill([n, n], p)
         return W
+
 
 
     def beta_creator(self, n_samples, id_):
@@ -158,7 +163,7 @@ class SolverODE:
             x = self.layer2_u0(x)
             x = self.layer3_u0(x)
             x = self.layer4_u0(x)
-            x = 5.0 * self.layer5_u0(x) #15.0 * self.layer5_u0(x)
+            x = 15.0 * self.layer5_u0(x) #15.0 * self.layer5_u0(x)
             return x
 
     # ===================== FORWARD PASS =====================
@@ -177,11 +182,8 @@ class SolverODE:
         self.input = tf.transpose(self.id_)
         U = self.model_u0.call_u0(self.input)
 
-        #Z_empirical = tf.reshape(
-            #tf.matmul(self.W, tf.reshape(X[:, 1], [n_samples, 1])) *
-            #self.alpha_I_pop / tf.cast(n_samples, tf.float64), [n_samples, 1])
-        Z_empirical = tf.reshape(tf.matmul(self.W, tf.reshape(X[:, 1], [n_samples, 1])) *self.alpha_I_pop, [n_samples, 1])
-
+        Z_empirical = tf.reshape(tf.matmul(self.W, tf.reshape(X[:, 1], [n_samples, 1])) *self.alpha_I_pop /tf.cast(n_samples, tf.float64),[n_samples, 1])
+        
         ALPHA = self.equation.optimal_ALPHA(U, Z_empirical, self.beta_vector)
         P = tf.tile(tf.reshape(self.m0, [1, self.Nstates]), [n_samples, 1])
 
@@ -196,12 +198,10 @@ class SolverODE:
         # ONE STEP
         P_next = P + self.equation.driver_P(Z_empirical, P, ALPHA, self.beta_vector) * self.Delta_t
         # U_next = U + self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
-        U_next = U - self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
+        U_next = U + self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
         X_next = tf.concat([P_next, tf.transpose(self.id_)], axis=1)
         P, U, X = P_next, U_next, X_next
-        #Z_empirical = tf.reshape(tf.matmul(self.W, tf.reshape(X[:, 1], [n_samples, 1])) *
-                                 #self.alpha_I_pop / tf.cast(n_samples, tf.float64), [n_samples, 1])
-        Z_empirical = tf.reshape(tf.matmul(self.W, tf.reshape(X[:, 1], [n_samples, 1])) *self.alpha_I_pop, [n_samples, 1])
+        Z_empirical = tf.reshape(np.matmul(self.W, X[:,1]) * self.alpha_I_pop / n_samples, [n_samples,1])
         # LOOP
         for _ in range(1, self.Nmax_iter + 1):
             mean_inf = tf.reduce_mean(X[:, 1])
@@ -212,7 +212,7 @@ class SolverODE:
 
             if t < self.T:
                 P_next = P + self.equation.driver_P(Z_empirical, P, ALPHA, self.beta_vector) * self.Delta_t
-                U_next = U - self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
+                U_next = U + self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
                 X_next = tf.concat([P_next, tf.transpose(self.id_)], axis=1)
 
                 self.t_path = tf.concat([self.t_path, tf.reshape(t, (1, 1))], axis=1)
@@ -279,8 +279,8 @@ class SolverODE:
             # --- DEBUG: check gradients ---
             grad_status = [g is None for g in grads]
             grad_max = [tf.reduce_max(tf.abs(g)).numpy() if g is not None else None for g in grads]
-            print(f"[DEBUG] Step {step} grad None flags: {grad_status}")
-            print(f"[DEBUG] Step {step} grad max abs values: {grad_max}")
+            #print(f"[DEBUG] Step {step} grad None flags: {grad_status}")
+            #print(f"[DEBUG] Step {step} grad max abs values: {grad_max}")
 
             optimizer.apply_gradients(zip(grads, self.model_u0.trainable_variables))
 
