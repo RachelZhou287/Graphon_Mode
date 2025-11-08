@@ -75,33 +75,61 @@ def build_graphon(cfg):
         assert conn.shape == (n_groups, n_groups), \
             f"Connection matrix must be {n_groups}x{n_groups}, got {conn.shape}"
 
-        # Compute boundaries (cumulative)
+        # Compute boundaries (cumulative) in [0,1]
         boundaries = np.cumsum(groups)
 
+        # Pre-create TF constants for speed
+        boundaries_tf = tf.constant(boundaries, dtype=tf.float64)
+        conn_tf = tf.convert_to_tensor(conn, dtype=tf.float64)
+
         def group_idx(val):
-            """Assign an agent in [0,1] to a group index (0..n_groups-1)."""
+            """
+            Assign an agent in [0,1] to a group index (0..n_groups-1).
+            Supports scalar, numpy arrays, and TF tensors of any shape.
+            """
+            # --- TensorFlow case ---
             if isinstance(val, tf.Tensor):
-                # For TensorFlow tensors
-                idx = tf.searchsorted(tf.constant(boundaries, dtype=tf.float64),
-                                      tf.cast(val, tf.float64),
-                                      side="right")
-                return tf.minimum(idx, n_groups - 1)
+                v = tf.cast(val, tf.float64)
+                orig_shape = tf.shape(v)
+                v_flat = tf.reshape(v, [-1])  # 1-D
+
+                # searchsorted on (1-D boundaries, 1-D values)
+                idx_flat = tf.searchsorted(boundaries_tf, v_flat, side="right")
+                idx_flat = tf.minimum(idx_flat, n_groups - 1)
+
+                idx = tf.reshape(idx_flat, orig_shape)
+                return idx
+
+            # --- NumPy / scalar case ---
             else:
-                # For numpy / scalar inputs
                 idx = np.searchsorted(boundaries, val, side="right")
-                return min(idx, n_groups - 1)
+                return min(int(idx), n_groups - 1)
 
         def w(x, y):
+            """
+            x, y: same shape (scalar, vector, or matrix of ids in [0,1]).
+            Returns: connection strengths with same shape.
+            """
             i = group_idx(x)
             j = group_idx(y)
+
+            # TensorFlow path
             if isinstance(i, tf.Tensor) or isinstance(j, tf.Tensor):
-                conn_tf = tf.convert_to_tensor(conn, dtype=tf.float64)
-                return tf.gather_nd(conn_tf, tf.stack([i, j], axis=-1))
+                i_tf = tf.cast(i, tf.int32)
+                j_tf = tf.cast(j, tf.int32)
+
+                # i_tf, j_tf have the same shape as x/y
+                # We can index conn_tf elementwise.
+                indices = tf.stack([i_tf, j_tf], axis=-1)  # shape (..., 2)
+                w_vals = tf.gather_nd(conn_tf, indices)   # shape (...)
+
+                return tf.cast(w_vals, tf.float64)
+
+            # NumPy / scalar path
             else:
                 return conn[i, j]
 
         return w
-
     # ------------------------------------------------------------
     # 5) Unknown graphon mode
     # ------------------------------------------------------------
