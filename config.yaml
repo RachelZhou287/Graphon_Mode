@@ -1,66 +1,54 @@
-#config.yaml
+solver:
+  n_seed: 7
 
-n_samples: 100
-batch_size: 100    
-valid_size: 200
-Nstates: 3
-T: 100
-Delta_t: 0.05
-  # --- policy parameters---
-lambda: [1.0, 0.9, 1.0]   # λ for S, I, R
-cost_I: 1.0
-cost_lambda: [10.0, 0.0, 0.0]  # penalties for deviation
-n_maxstep: 2000
+  # initial condition
+  I0: 0.1
+  R0: 0.4
+  # S0 = 1 - I0 - R0 (computed in Python)
+  T: 40.0
+  Nstates: 3
 
-  # --- Graphon settings ---
-  # options: constant, powerlaw, star, piecewise
-graphon_mode: piecewise
+  batch_size: 100
+  valid_size: 200
+  n_maxstep: 1000
+    
+  n_displaystep: 5
+  n_savetofilestep: 10
+  stdNN: 0.01
 
-  #respective parameters
-g: 0.2            # exponent for powerlaw graphon
-hub_threshold: 0.05  # threshold for star graphon: 5% are hub agents
-p: 0.3               # constant graphon value (if used)
-
-  # --- Piecewise graphon parameters ---
-  #piecewise:
-    #groups: [0.27, 0.33, 0.27, 0.13]   # group proportions (must sum to 1.0)
-    #connection_matrix:                 # interaction weights between groups
-      #- [1.0, 0.9, 0.8, 0.7]
-      #- [0.9, 1.0, 0.8, 0.8]
-      #- [0.8, 0.8, 1.0, 0.8]
-      #- [0.7, 0.8, 0.8, 1  ]
-  
-piecewise:
-    groups: [0.4, 0.2, 0.4]
-    connection_matrix:
-        - [0.3, 0.3, 0.3]
-        - [0.3, 1.0, 0.7]
-        - [0.3, 0.7, 1.0]
-
-  #piecewise:
-    #groups: [0.2, 0.2, 0.2, 0.2, 0.2]   # 5 equal-sized groups
-    #connection_matrix:
-      #- [1.0, 0.8, 0.6, 0.4, 0.2]
-      #- [0.8, 1.0, 0.7, 0.5, 0.3]
-      #- [0.6, 0.7, 1.0, 0.6, 0.4]
-      #- [0.4, 0.5, 0.6, 1.0, 0.5]
-      #- [0.2, 0.3, 0.4, 0.5, 1.0]
+  lr_boundaries: [100]
+  lr_values: [0.01, 0.01]
 
 
-  # --- Epidemic parameters ---
-beta: [0.2, 0.3, 0.4]                # infection rate
-gamma: 0.1               # recovery rate
-m0: [0.8, 0.1, 0.1]    # initial S, I, R
+  # epidemiological parameters (passed to FBODE)
+  beta: [0.4, 0.4, 0.3]            # 3 values since Nstates = 3
+  gamma: 0.1
+  lambda1: 1.0
+  lambda2: 0.9
+  lambda3: 1.0
+  alpha_I_pop: 0.9                 # = lambda2
+  cost_I: 1.0
+  cost_lambda1: 10.0
+  kappa: 0.0
 
-  # --- Neural net settings ---
-nn_hidden: [100, 50, 50, 50]
-nn_stdinit: 0.5
+  g: 0.2
+  Delta_t: 0.05
 
-#train:
-do_train: true
-epochs: 100
-#learning_rate: 0.001
-batch_size: 100
+graphon:
+  graphon_mode: piecewise #constant/powerlaw/star/piecewise
 
-#output:
-prefix: fbode_run
+  constant:
+    p: 0.3
+
+  powerlaw: 
+    g: 0.2
+
+  star:
+    hub_threshold: 0.05
+
+  piecewise:
+    group_bounds: [0.0, 0.4, 0.6, 1.0]
+    Wblocks:
+      - [1.0, 0.5, 0.3]
+      - [0.5, 1.0, 0.4]
+      - [0.3, 0.4, 1.0]
