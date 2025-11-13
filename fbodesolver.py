@@ -3,316 +3,321 @@ import tensorflow as tf
 import numpy as np
 import os
 import math
-
-# fbodesolver.py
-tf.keras.backend.set_floatx('float64')  # Enforce 64-bit precision globally
+import graphon_utils as gu
 
 
 class SolverODE:
-    def __init__(self, equation, T, m0, batch_size, valid_size, n_maxstep, cfg=None, graphon=None):
+    def __init__(self,
+                 equation, T, m0,
+                 batch_size, valid_size, n_maxstep,
+                 Nstates, n_displaystep, n_savetofilestep,
+                 stdNN, lr_boundaries, lr_values):# ---------- TF2
         # initial condition and horizon
-        self.m0 = tf.convert_to_tensor(m0, dtype=tf.float64)
-        self.T = tf.cast(T, tf.float64)
+        self.m0 = m0
+        self.T = T
 
         # equation (of ode equation class)
         self.equation = equation
 
         # parameters for neural network and gradient descent
-        self.batch_size = batch_size
-        self.valid_size = valid_size
-        self.n_maxstep = n_maxstep
-        self.n_displaystep = 5
-        self.n_savetofilestep = 10
-        self.stdNN = 1.e-2
-        self.lr_boundaries = [500]
-        self.lr_values = [1e-2, 1e-3] 
-        self.activation_fn_choice = tf.nn.sigmoid
+        self.batch_size =           batch_size
+        self.valid_size =           valid_size
+        self.n_maxstep =            n_maxstep
+        self.n_displaystep =        n_displaystep
+        self.n_savetofilestep =     n_savetofilestep
+        self.stdNN =                stdNN
+        self.lr_boundaries =        lr_boundaries
+        self.lr_values =            lr_values
+        self.activation_fn_choice = tf.nn.sigmoid # tf.nn.leaky_relu
 
-        self.alpha_I_pop = tf.cast(self.equation.lambda2, tf.float64)
-        self.beta = self.equation.beta
-        self.g = tf.cast(self.equation.g, tf.float64)
-        self.Delta_t = tf.cast(self.equation.Delta_t, tf.float64)
-        self.Nmax_iter = int(math.ceil(self.T / self.Delta_t))
-        self.Nstates = 3  # S I R
-
-        # --- graphon setup ---
-        self.cfg = cfg or {}
-        if graphon is not None:
-            self.graphon = graphon
-        else:
-            # fallback: construct from mode
-            mode = self.cfg.get("graphon_mode", "constant")
-            if mode == "powerlaw":
-                g_exp = tf.cast(self.cfg.get("g", -0.3), tf.float64)
-
-                def powerlaw_graphon(x, y):
-                    eps = tf.constant(1e-8, tf.float64)
-                    return tf.pow(tf.maximum(x, eps) * tf.maximum(y, eps), g_exp)
-
-                self.graphon = powerlaw_graphon
-            elif mode == "constant":
-                p = self.cfg.get("p", 1.0)
-                self.graphon = lambda x, y: tf.cast(p, tf.float64)
-            else:
-                p = self.cfg.get("p", 1.0)
-                self.graphon = lambda x, y: tf.cast(p, tf.float64)
-
-        self.graphon_vec = np.vectorize(
-            lambda x, y: float(self.graphon(tf.constant(x, tf.float64), tf.constant(y, tf.float64))),
-            otypes=[float]
-        )
+        self.alpha_I_pop =          self.equation.lambda2
+        self.beta =                 self.equation.beta
+        self.g =                    self.equation.g
+        self.Delta_t =              self.equation.Delta_t
+        self.Nmax_iter =            int(math.ceil(self.T/self.Delta_t))
+        self.Nstates =              Nstates
 
         # neural net
-        self.model_u0 = self.MyModelU0(self.Nstates)
+        self.model_u0 =    self.MyModelU0(self.Nstates)
 
         # timing
         self.time_init = time.time()
+        
+        #graphon
+        cfg = self.equation.graphon_cfg
 
     def id_creator(self, n_samples):
-        return tf.random.uniform(shape=(1, n_samples), dtype=tf.float64)
+        # id_ = np.random.randint(2, size=(1, n_samples)) +1.0
+        id_ = np.random.uniform(size=(1, n_samples))
+        return id_
 
     def sample_x0(self, n_samples, id_):
-        # initial state samples [S0, I0, R0, id]
-        states = tf.tile(tf.reshape(self.m0, [1, -1]), [n_samples, 1])
-        return tf.concat([states, tf.transpose(id_)], axis=1)
+        #here we have 4 dimensional vectors for each X_0 last one is id which is going to be sampled uniformly between 0 and 1; the first 3 are going to be same and equal to m_0
+        X0_sample = np.concatenate((np.tile(self.m0, (n_samples,1)), id_.T), axis=1)
+        return X0_sample
 
-    #def build_weight_matrix(self, ids):
-        #"""
-        #Stable adjacency matrix W[i,j] = graphon(id_i, id_j).
-        #Uses float64 and supports power-law mode safely.
-        #"""
-        #ids = tf.cast(ids, tf.float64)
-        #n = tf.shape(ids)[0]
-        #ids_col = tf.reshape(ids, [n, 1])
-        #ids_row = tf.reshape(ids, [1, n])
-        #Xi = tf.tile(ids_col, [1, n])
-        #Xj = tf.tile(ids_row, [n, 1])
-
-        # compute using self.graphon in TF directly
-        #g_fn = self.graphon
-        #if self.cfg.get("graphon_mode", "constant") == "powerlaw":
-            #eps = tf.constant(1e-9, tf.float64)
-           # W = tf.pow(tf.maximum(Xi, eps) * tf.maximum(Xj, eps), self.g)
-        
-        #else:
-            #W = g_fn(Xi, Xj)
-
-        #return tf.cast(W, tf.float64)
-
-    def build_weight_matrix(self, ids):
-        ids = tf.cast(ids, tf.float64)
-        n = tf.shape(ids)[0]
-        ids_col = tf.reshape(ids, [n, 1])
-        ids_row = tf.reshape(ids, [1, n])
-        Xi = tf.tile(ids_col, [1, n])
-        Xj = tf.tile(ids_row, [n, 1])
+    def individual_graphon(self, n_samples, a):
+        mode = self.equation.graphon_mode
+        cfg  = self.equation.graphon_cfg
     
-        mode = self.cfg.get("graphon_mode", "constant")
-        if mode == "powerlaw":
-            g = tf.cast(self.cfg.get("g", 0.3), tf.float64)
-            eps = tf.constant(1e-8, tf.float64)
-            W = tf.pow(tf.maximum(Xi, eps) * tf.maximum(Xj, eps), g)
+        ids = self.X0[:, self.Nstates].numpy()
+    
+        if mode == "constant":
+            p = cfg["constant"]["p"]
+            Wfull = gu.constant_graphon(np.array([a]), ids, p)
+    
+        elif mode == "powerlaw":
+            g = cfg["powerlaw"]["g"]
+            Wfull = gu.powerlaw_graphon(np.array([a]), ids, g)
+    
+        elif mode == "star":
+            th = cfg["star"]["hub_threshold"]
+            Wfull = gu.star_graphon(np.array([a]), ids, th)
+    
         elif mode == "piecewise":
-            from graphon_utils import build_graphon
-            w_fn = build_graphon(self.cfg)
-            W = w_fn(Xi, Xj)
+            Wblocks = cfg["piecewise"]["Wblocks"]
+            bounds  = cfg["piecewise"]["group_bounds"]
+            Wfull = gu.piecewise_graphon(np.array([a]), ids, Wblocks, bounds)
+    
         else:
-            p = tf.cast(self.cfg.get("p", 1.0), tf.float64)
-            W = tf.fill([n, n], p)
-        return W
+            raise ValueError(f"Unknown graphon mode: {mode}")
+    
+        return Wfull.reshape(-1)
 
 
+    
 
     def beta_creator(self, n_samples, id_):
-        """
-        Assign group-specific infection rates (beta) to each agent.
-        """
-        if isinstance(self.beta, (float, int)):
-            return tf.fill([n_samples, 1], tf.cast(self.beta, tf.float64))
+        beta_vector = np.zeros((n_samples, 1))
+        for i in np.arange(n_samples):
+            if (id_[0,i] < 0.4 ):
+                beta_vector[i] = self.beta[0]
+            elif (id_[0,i] > 0.6):
+                beta_vector[i] = self.beta[2]
+            else:
+                beta_vector[i] = self.beta[1]
+        return beta_vector
 
-        beta_array = tf.convert_to_tensor(self.beta, dtype=tf.float64)
-        n_groups = tf.shape(beta_array)[0]
-
-        if "piecewise" in self.cfg and "groups" in self.cfg["piecewise"]:
-            groups = tf.convert_to_tensor(self.cfg["piecewise"]["groups"], dtype=tf.float64)
-            boundaries = tf.cumsum(groups)
-        else:
-            boundaries = tf.linspace(tf.constant(0.0, tf.float64), tf.constant(1.0, tf.float64), n_groups + 1)[1:]
-
-        ids_flat = tf.reshape(id_, [-1])
-        group_idx = tf.searchsorted(boundaries, ids_flat, side='right')
-        group_idx = tf.minimum(group_idx, n_groups - 1)
-        beta_vector = tf.gather(beta_array, group_idx)
-        return tf.reshape(beta_vector, [n_samples, 1])
-
-    # ===================== MODEL =====================
+    # ========== MODEL
 
     class MyModelU0(tf.keras.Model):
-        def __init__(self, Nstates):
-            super().__init__()
-            init = tf.keras.initializers.RandomNormal(mean=0.0, stddev=0.5)
-            self.layer1_u0 = tf.keras.layers.Dense(100, activation='sigmoid', kernel_initializer=init, bias_initializer='zeros', dtype=tf.float64)
-            self.layer2_u0 = tf.keras.layers.Dense(50, activation='sigmoid', kernel_initializer=init, bias_initializer='zeros', dtype=tf.float64)
-            self.layer3_u0 = tf.keras.layers.Dense(50, activation='sigmoid', kernel_initializer=init, bias_initializer='zeros', dtype=tf.float64)
-            self.layer4_u0 = tf.keras.layers.Dense(50, activation='sigmoid', kernel_initializer=init, bias_initializer='zeros', dtype=tf.float64)
-            self.layer5_u0 = tf.keras.layers.Dense(Nstates, activation='sigmoid', dtype=tf.float64)
-
+        def __init__(self, Nstates):  # , miniminibatch_size):
+            super(tf.keras.Model, self).__init__()
+            # FOR  u0
+            self.layer1_u0 = tf.keras.layers.Dense(units=100, activation='sigmoid',
+                                                   kernel_initializer=tf.keras.initializers.RandomNormal(mean=0.0,
+                                                                                                         stddev=0.5),
+                                                   bias_initializer='zeros')
+            self.layer2_u0 = tf.keras.layers.Dense(units=50, activation='sigmoid',
+                                                   kernel_initializer=tf.keras.initializers.RandomNormal(mean=0.0,
+                                                                                                         stddev=0.5),
+                                                   bias_initializer='zeros')
+            self.layer3_u0 = tf.keras.layers.Dense(units=50, activation='sigmoid',
+                                                   kernel_initializer=tf.keras.initializers.RandomNormal(mean=0.0,
+                                                                                                         stddev=0.5),
+                                                   bias_initializer='zeros')
+            self.layer4_u0 = tf.keras.layers.Dense(units=50, activation='sigmoid',
+                                                   kernel_initializer=tf.keras.initializers.RandomNormal(mean=0.0,
+                                                                                                         stddev=0.5),
+                                                   bias_initializer='zeros')
+            self.layer5_u0 = tf.keras.layers.Dense(units=Nstates,
+                                                   activation='sigmoid')  # since we have u for each state
+            
         def call_u0(self, input):
-            x = tf.cast(input, tf.float64)
-            x = self.layer1_u0(x)
-            x = self.layer2_u0(x)
-            x = self.layer3_u0(x)
-            x = self.layer4_u0(x)
-            x = 15.0 * self.layer5_u0(x) #15.0 * self.layer5_u0(x)
-            return x
-
-    # ===================== FORWARD PASS =====================
+            result = self.layer1_u0(input)
+            result = self.layer2_u0(result)
+            result = self.layer3_u0(result)
+            result = self.layer4_u0(result)
+            result = 15 * self.layer5_u0(result)
+            return result
 
     def forward_pass(self, n_samples):
         start_time = time.time()
-
+        # SAMPLE INITIAL POINTS
         self.id_ = self.id_creator(n_samples)
         self.X0 = tf.cast(self.sample_x0(n_samples, self.id_), tf.float64)
-        ids_flat = tf.reshape(self.id_, [-1])
-        self.W = tf.cast(self.build_weight_matrix(ids_flat), tf.float64)
-        self.beta_vector = tf.cast(self.beta_creator(n_samples, self.id_), tf.float64)
+        #self.W =  tf.reshape([self.individual_graphon(n_samples, self.X0[a, self.Nstates]) for a in np.arange(n_samples)],[n_samples,n_samples])
+        ids = self.X0[:, self.Nstates].numpy()   # convert to numpy only once
+        Wrows = [ self.individual_graphon(n_samples, a) for a in ids ]
+        self.W = tf.constant(Wrows, dtype=tf.float64)
 
-        t = tf.constant(0.0, tf.float64)
-        X = self.X0
-        self.input = tf.transpose(self.id_)
+        self.beta_vector= self.beta_creator(n_samples, self.id_)
+
+        # BUILD THE ODE SDE DYNAMICS
+        # INITIALIZATION
+        t =             0.0
+        X =             self.X0
+        self.input = tf.cast(self.id_.T, tf.dtypes.float64)
         U = self.model_u0.call_u0(self.input)
+        #Z_empirical = tf.reshape(np.matmul(self.W, X[:,1]) * self.alpha_I_pop / n_samples,[n_samples,1])
+        Z_empirical = tf.reshape(tf.matmul(self.W, X[:,1:2]) * self.alpha_I_pop / tf.cast(n_samples, tf.float64),(n_samples,1))
 
-        Z_empirical = tf.reshape(tf.matmul(self.W, tf.reshape(X[:, 1], [n_samples, 1])) *self.alpha_I_pop /tf.cast(n_samples, tf.float64),[n_samples, 1])
-        
         ALPHA = self.equation.optimal_ALPHA(U, Z_empirical, self.beta_vector)
-        P = tf.tile(tf.reshape(self.m0, [1, self.Nstates]), [n_samples, 1])
+        P = tf.cast(tf.repeat([self.m0], repeats=n_samples, axis=0), tf.float64)
 
-        # STORE
-        self.U_path = tf.expand_dims(U, axis=1)
-        self.P_path = tf.expand_dims(P, axis=1)
-        self.X_path = tf.expand_dims(X, axis=1)
-        self.ALPHA_path = tf.expand_dims(ALPHA, axis=1)
-        self.t_path = tf.reshape(t, (1, 1))
-        self.Z_empirical_path = tf.expand_dims(Z_empirical, axis=1)
+        # STORE SOLUTION
+        self.U_path =           U # used to store the sequence of U_t's
+        self.P_path =           P
+        self.X_path =           X
+        self.ALPHA_path =       ALPHA
+        self.t_path =           tf.reshape(tf.cast(t, tf.dtypes.float64), (1,1))
+        self.Z_empirical_path = Z_empirical
 
-        # ONE STEP
+        # DYNAMICS FOR P AND U
         P_next = P + self.equation.driver_P(Z_empirical, P, ALPHA, self.beta_vector) * self.Delta_t
-        # U_next = U + self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
         U_next = U + self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
-        X_next = tf.concat([P_next, tf.transpose(self.id_)], axis=1)
-        P, U, X = P_next, U_next, X_next
-        Z_empirical = tf.reshape(np.matmul(self.W, X[:,1]) * self.alpha_I_pop / n_samples, [n_samples,1])
-        # LOOP
-        for _ in range(1, self.Nmax_iter + 1):
-            mean_inf = tf.reduce_mean(X[:, 1])
-            if mean_inf < 1e-3:
+        X_next = tf.concat([P_next, tf.cast(self.id_.T, tf.float64)], axis=1)
+
+        # UPDATES
+        P =             P_next
+        U =             U_next
+        X =             X_next
+
+        # Z_empirical = tf.reshape(tf.math.pow(X[:,self.Nstates],self.g)*np.mean(self.alpha_I_pop *  tf.math.pow(X[:,self.Nstates],self.g) * X[:,1]),[n_samples,1])
+        Z_empirical = tf.reshape(tf.matmul(self.W, X[:, 1:2]) * self.alpha_I_pop / tf.cast(n_samples, tf.float64),(n_samples,1))
+            # LOOP IN TIME
+        for i_t in range(1, self.Nmax_iter+1):
+            if (np.mean(X[:,1]) < 1.e-3):  # TO AVOID REACHING 0 INFECTED AND HAVING NaN
+                print("INNER P_empirical[1]<1.e-3 = ", np.mean(X[:,1]) , "\t t = ", t)
                 break
             t = t + self.Delta_t
+            # GET STATE AND USE NEURAL NETWORK
             ALPHA = self.equation.optimal_ALPHA(U, Z_empirical, self.beta_vector)
 
-            if t < self.T:
+            if (t < self.T):
                 P_next = P + self.equation.driver_P(Z_empirical, P, ALPHA, self.beta_vector) * self.Delta_t
                 U_next = U + self.equation.driver_U(Z_empirical, U, ALPHA, self.beta_vector) * self.Delta_t
-                X_next = tf.concat([P_next, tf.transpose(self.id_)], axis=1)
+                X_next = tf.concat([P_next, tf.cast(self.id_.T, tf.float64)], axis=1)
 
-                self.t_path = tf.concat([self.t_path, tf.reshape(t, (1, 1))], axis=1)
-                self.P_path = tf.concat([self.P_path, tf.expand_dims(P, axis=1)], axis=1)
-                self.U_path = tf.concat([self.U_path, tf.expand_dims(U, axis=1)], axis=1)
-                self.X_path = tf.concat([self.X_path, tf.expand_dims(X, axis=1)], axis=1)
-                self.ALPHA_path = tf.concat([self.ALPHA_path, tf.expand_dims(ALPHA, axis=1)], axis=1)
-                self.Z_empirical_path = tf.concat([self.Z_empirical_path, tf.expand_dims(Z_empirical, axis=1)], axis=1)
+                # STORE SOLUTION
+                self.t_path =           tf.concat([self.t_path, tf.reshape(tf.cast(t, tf.dtypes.float64), (1,1))], axis=1)
+                self.P_path =           tf.concat([self.P_path, P], axis=1)
+                self.U_path =           tf.concat([self.U_path, U], axis=1)
+                self.X_path =           tf.concat([self.X_path, X], axis=1)
+                self.ALPHA_path =       tf.concat([self.ALPHA_path, ALPHA], axis=1)
+                self.Z_empirical_path = tf.concat([self.Z_empirical_path, Z_empirical], axis=1)
 
-                P, U, X = P_next, U_next, X_next
-                Z_empirical = tf.reshape(tf.matmul(self.W, tf.reshape(X[:, 1], [n_samples, 1])) *self.alpha_I_pop, [n_samples, 1])
+                # UPDATES
+                P = P_next
+                U = U_next
+                X = X_next
+                Z_empirical = tf.reshape(tf.matmul(self.W, X[:, 1:2]) * self.alpha_I_pop / tf.cast(n_samples, tf.float64),(n_samples, 1))
+
             else:
                 break
-
-        # target = tf.zeros([tf.shape(U)[0], self.Nstates], dtype=tf.float64)
-        target = tf.zeros_like(U)
-        error = U - target
-        self.loss = tf.reduce_mean(tf.square(error))
+        # COMPUTE ERROR
+        # target = self.equation.terminal_g_empirical(X, P_empirical)
+        target =                 tf.zeros((1, self.Nstates), dtype=tf.dtypes.float64)
+        error =                  U - target # penalization term
+        self.loss= tf.reduce_sum(tf.reduce_mean(error**2, axis=0))
         self.time_forward_pass = time.time() - start_time
-        return self.loss
 
-    # ===================== TRAIN =====================
 
     def train(self):
         print('========== START TRAINING ==========')
         start_time = time.time()
-        lr_schedule = tf.keras.optimizers.schedules.PiecewiseConstantDecay(
-            self.lr_boundaries, self.lr_values)
-        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+        # TRAIN OPERATIONS
+        lr_schedule = tf.keras.optimizers.schedules.PiecewiseConstantDecay( # FOR LRSCHEDULE
+            self.lr_boundaries, self.lr_values) # FOR LRSCHEDULE
+        optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule) # ---------- TF2 # FOR LRSCHEDULE
 
-        checkpoint_directory = "checkpoints/"
-        os.makedirs(checkpoint_directory, exist_ok=True)
+
+
+        checkpoint_directory = "checkpoints/" #+ datetime.datetime.now().strftime("%Y:%m:%d-%H.%M")
         checkpoint_prefix = os.path.join(checkpoint_directory, "ckpt")
-        checkpoint = tf.train.Checkpoint(
-            optimizer=optimizer,
-            model=self.model_u0,
-            optimizer_step=tf.compat.v1.train.get_or_create_global_step()
-        )
+        checkpoint = tf.train.Checkpoint(optimizer=optimizer,
+                                         model=self.model_u0,
+                                         # optimizer_step=tf.train.get_or_create_global_step())
+                                         optimizer_step=tf.compat.v1.train.get_or_create_global_step()) # TF2
+
         checkpoint.restore(tf.train.latest_checkpoint(checkpoint_directory))
+
 
         self.loss_history = []
 
-        _ = self.forward_pass(self.valid_size)
-        temp_loss = self.loss
-        self.loss_history.append(temp_loss.numpy())
+        # INITIALIZATION
+        _ = self.forward_pass(self.valid_size) # ---------- TF2
+        temp_loss = self.loss # ---------- TF2
+        self.loss_history.append(temp_loss)
         step = 0
-        print(f"step: {step:5d}, loss: {temp_loss:.4e} runtime: {int(time.time() - start_time + self.time_forward_pass):4d}s")
-        with open("res-console.txt", "a") as f:
-            f.write(f"step: {step:5d}, loss: {temp_loss:.4e} runtime: {int(time.time() - start_time + self.time_forward_pass):4d}s\n")
+        print("step: %5u, loss: %.4e " % (step, temp_loss) + \
+              "runtime: %4u s" % (time.time() - start_time + self.time_forward_pass))
+        file = open("res-console.txt","a") # save what is printed to the console in a text file
+        file.write("step: %5u, loss: %.4e " % (0, temp_loss) + \
+            "runtime: %4u s" % (time.time() - start_time + self.time_forward_pass) + "\n")
+        file.close()
+        datafile_name = 'data/data_fbodesolver_solution_iter{}.npz'.format(step)
+        np.savez(datafile_name,
+                    t_path = self.t_path,
+                    P_path = self.P_path,
+                    U_path = self.U_path,
+                    X_path = self.X_path,
+                    ALPHA_path = self.ALPHA_path,
+                    Z_path = self.Z_empirical_path,
+                    loss_history = self.loss_history)
 
-        os.makedirs("data", exist_ok=True)
-        np.savez(f'data/data_fbodesolver_solution_iter{step}.npz',
-                 t_path=self.t_path.numpy(), P_path=self.P_path.numpy(),
-                 U_path=self.U_path.numpy(), X_path=self.X_path.numpy(),
-                 ALPHA_path=self.ALPHA_path.numpy(), Z_path=self.Z_empirical_path.numpy(),
-                 loss_history=np.array(self.loss_history))
-
-        # MAIN TRAIN LOOP
+        # BEGIN SGD ITERATION
         for step in range(1, self.n_maxstep + 1):
-            with tf.GradientTape() as tape:
-                loss = self.forward_pass(self.batch_size)
-                #_ = self.forward_pass(self.batch_size)
-            grads = tape.gradient(loss, self.model_u0.trainable_variables)
-            # --- DEBUG: check gradients ---
-            grad_status = [g is None for g in grads]
-            grad_max = [tf.reduce_max(tf.abs(g)).numpy() if g is not None else None for g in grads]
-            #print(f"[DEBUG] Step {step} grad None flags: {grad_status}")
-            #print(f"[DEBUG] Step {step} grad max abs values: {grad_max}")
+            # AT EACH ITERATION: make a forward run to compute the gradient of the loss and update the NN
+            with tf.GradientTape() as tape: # use tape to compute the gradient; see below
+                # tape.watch(self.input)
+                # tape.watch(self.model_u0.variables)
+                predicted = self.forward_pass(self.batch_size)
+                curr_loss = self.loss
 
-            optimizer.apply_gradients(zip(grads, self.model_u0.trainable_variables))
+            # Compute gradient w.r.t. parameters of NN:
+            grads = tape.gradient(curr_loss, self.model_u0.variables)
 
+            # Make one SGD step:
+            optimizer.apply_gradients(zip(grads, self.model_u0.variables))#, global_step=tf.train.get_or_create_global_step())
+
+            # PRINT RESULTS TO SCREEN AND OUTPUT FILE
             if step == 1 or step % self.n_displaystep == 0:
-                _ = self.forward_pass(self.valid_size)
-                temp_loss = self.loss
-                self.loss_history.append(temp_loss.numpy())
-                print(f"step: {step:5d}, loss: {temp_loss:.4e} runtime: {int(time.time() - start_time + self.time_forward_pass):4d}s")
-                with open("res-console.txt", "a") as f:
-                    f.write(f"step: {step:5d}, loss: {temp_loss:.4e} runtime: {int(time.time() - start_time + self.time_forward_pass):4d}s\n")
-                if step == 1 or step % self.n_savetofilestep == 0:
-                    np.savez(f'data/data_fbodesolver_solution_iter{step}.npz',
-                             t_path=self.t_path.numpy(), P_path=self.P_path.numpy(),
-                             U_path=self.U_path.numpy(), X_path=self.X_path.numpy(),
-                             ALPHA_path=self.ALPHA_path.numpy(), Z_path=self.Z_empirical_path.numpy(),
-                             loss_history=np.array(self.loss_history))
+                _ = self.forward_pass(self.valid_size) # ---------- TF2
+                temp_loss = self.loss # ---------- TF2
+                self.loss_history.append(temp_loss)
+                print("step: %5u, loss: %.4e " % (step, temp_loss) + \
+                    "runtime: %4u s" % (time.time() - start_time + self.time_forward_pass))
+                file = open("res-console.txt","a")
+                file.write("step: %5u, loss: %.4e " % (step, temp_loss) + \
+                    "runtime: %4u s" % (time.time() - start_time + self.time_forward_pass) + "\n")
+                file.close()
+                if (step==1 or step % self.n_savetofilestep == 0):
+                    datafile_name = 'data/data_fbodesolver_solution_iter{}.npz'.format(step)
+                    np.savez(datafile_name,
+                                t_path = self.t_path,
+                                P_path = self.P_path,
+                                U_path = self.U_path,
+                                X_path = self.X_path,
+                                ALPHA_path = self.ALPHA_path,
+                                Z_path = self.Z_empirical_path,
+                                loss_history = self.loss_history)
                     checkpoint.save(file_prefix=checkpoint_prefix)
-            elif step % self.n_savetofilestep == 0:
+            # SAVE RESULTS TO DATA FILE
+            elif (step % self.n_savetofilestep == 0):
                 print("SAVING TO DATA FILE...")
-                _ = self.forward_pass(self.valid_size)
-                temp_loss = self.loss
-                self.loss_history.append(temp_loss.numpy())
-                np.savez(f'data/data_fbodesolver_solution_iter{step}.npz',
-                         t_path=self.t_path.numpy(), P_path=self.P_path.numpy(),
-                         U_path=self.U_path.numpy(), X_path=self.X_path.numpy(),
-                         ALPHA_path=self.ALPHA_path.numpy(), Z_path=self.Z_empirical_path.numpy(),
-                         loss_history=np.array(self.loss_history))
-
-        np.savez('data/data_fbodesolver_solution_iter-final.npz',
-                 t_path=self.t_path.numpy(), P_path=self.P_path.numpy(),
-                 U_path=self.U_path.numpy(), X_path=self.X_path.numpy(),
-                 ALPHA_path=self.ALPHA_path.numpy(), Z_path=self.Z_empirical_path.numpy(),
-                 loss_history=np.array(self.loss_history))
-        print(f"running time: {time.time() - self.time_init:.3f}s")
+                _ = self.forward_pass(self.valid_size) # ---------- TF2
+                temp_loss = self.loss # ---------- TF2
+                self.loss_history.append(temp_loss)
+                datafile_name = 'data/data_fbodesolver_solution_iter{}.npz'.format(step)
+                np.savez(datafile_name,
+                            t_path = self.t_path,
+                            P_path = self.P_path,
+                            U_path = self.U_path,
+                            X_path = self.X_path,
+                            ALPHA_path = self.ALPHA_path,
+                            Z_path = self.Z_empirical_path,
+                            loss_history = self.loss_history)
+        # COLLECT THE RESULTS
+        datafile_name = 'data/data_fbodesolver_solution_iter-final.npz'
+        np.savez(datafile_name,
+                    t_path = self.t_path,
+                    P_path = self.P_path,
+                    U_path = self.U_path,
+                    X_path = self.X_path,
+                    ALPHA_path = self.ALPHA_path,
+                    Z_path = self.Z_empirical_path,
+                    loss_history = self.loss_history)
+        end_time = time.time()
+        print("running time: %.3f s" % (end_time - self.time_init))
         print('========== END TRAINING ==========')
