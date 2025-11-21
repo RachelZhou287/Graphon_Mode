@@ -3,7 +3,7 @@ import tensorflow as tf
 import numpy as np
 import os
 import math
-import graphon_utils as gu
+#import graphon_utils as gu
 
 
 class SolverODE:
@@ -13,6 +13,7 @@ class SolverODE:
                  Nstates, n_displaystep, n_savetofilestep,
                  stdNN, lr_boundaries, lr_values):# ---------- TF2
         # initial condition and horizon
+
         self.m0 = m0
         self.T = T
 
@@ -42,9 +43,30 @@ class SolverODE:
 
         # timing
         self.time_init = time.time()
+    
         
         #graphon
         cfg = self.equation.graphon_cfg
+        self.graphon_mode = cfg["graphon_mode"] 
+        #print("DEBUG graphon_mode in SolverODE:", self.graphon_mode)
+        
+
+        # constant graphon: w(x,y) = p
+        self.graphon_constant = cfg["constant"]["p"]
+
+        if "powerlaw" in cfg:
+            self.g = cfg["powerlaw"].get("g", self.g)
+
+        # piecewise / block graphon parameters
+        self.group_bounds = None
+        self.Wblocks = None
+        if "piecewise" in cfg:
+            pw_cfg = cfg["piecewise"]
+            self.group_bounds = pw_cfg["group_bounds"]
+            # K x K matrix
+            self.Wblocks = tf.constant(pw_cfg["Wblocks"], dtype=tf.float64)
+            #print("DEBUG group_bounds:", self.group_bounds)
+            #print("DEBUG Wblocks shape:", self.Wblocks.shape)
 
     def id_creator(self, n_samples):
         # id_ = np.random.randint(2, size=(1, n_samples)) +1.0
@@ -56,47 +78,97 @@ class SolverODE:
         X0_sample = np.concatenate((np.tile(self.m0, (n_samples,1)), id_.T), axis=1)
         return X0_sample
 
-    def individual_graphon(self, n_samples, a):
-        mode = self.equation.graphon_mode
-        cfg  = self.equation.graphon_cfg
+    def individual_graphon(self, n_samples, x):
+        """
+        Return one row of the graphon: w(x, y_i) for i = 0,...,n_samples-1.
+        For piecewise: uses group_bounds and Wblocks.
+        """
+        w = tf.Variable(tf.zeros((n_samples,), dtype=tf.float64))
     
-        ids = self.X0[:, self.Nstates].numpy()
+        #
+        if self.graphon_mode == "piecewise":
+            bounds = self.group_bounds          # Plength K+1
+            W = self.Wblocks                    #  (K, K)
+            K = len(bounds) - 1                 # number of groups
     
-        if mode == "constant":
-            p = cfg["constant"]["p"]
-            Wfull = gu.constant_graphon(np.array([a]), ids, p)
+            def find_group(z):
+                for k in range(K - 1):
+                    if bounds[k] <= z < bounds[k + 1]:
+                        return k
+                return K - 1
     
-        elif mode == "powerlaw":
-            g = cfg["powerlaw"]["g"]
-            Wfull = gu.powerlaw_graphon(np.array([a]), ids, g)
+            # row group index from agent x
+            group_x = find_group(float(x))
     
-        elif mode == "star":
-            th = cfg["star"]["hub_threshold"]
-            Wfull = gu.star_graphon(np.array([a]), ids, th)
+            # fill the row w(x, y_i)
+            for i in range(n_samples):
+                xi = float(self.X0[i, self.Nstates])   # id of agent i
+                group_i = find_group(xi)
+                w[i].assign(W[group_x, group_i])
     
-        elif mode == "piecewise":
-            Wblocks = cfg["piecewise"]["Wblocks"]
-            bounds  = cfg["piecewise"]["group_bounds"]
-            Wfull = gu.piecewise_graphon(np.array([a]), ids, Wblocks, bounds)
+            return tf.convert_to_tensor(w)  # shape: (n_samples,)
     
+        elif self.graphon_mode == "powerlaw":
+            for i in range(n_samples):
+                yi = self.X0[i, self.Nstates]
+                w[i].assign(tf.math.pow(x * yi, -self.g))
+            return tf.convert_to_tensor(w)
+    
+        elif self.graphon_mode == "constant":
+            return tf.ones((n_samples,), dtype=tf.float64) * self.graphon_constant
+    
+        # min-max
         else:
-            raise ValueError(f"Unknown graphon mode: {mode}")
+            for i in range(n_samples):
+                yi = self.X0[i, self.Nstates]
+                w[i].assign(tf.minimum(x, yi) * (1 - tf.maximum(x, yi)))
+            return tf.convert_to_tensor(w)
     
-        return Wfull.reshape(-1)
 
-
-    
 
     def beta_creator(self, n_samples, id_):
-        beta_vector = np.zeros((n_samples, 1))
-        for i in np.arange(n_samples):
-            if (id_[0,i] < 0.4 ):
-                beta_vector[i] = self.beta[0]
-            elif (id_[0,i] > 0.6):
-                beta_vector[i] = self.beta[2]
+        
+        beta_vector = tf.Variable(tf.zeros((n_samples, 1), dtype=tf.float64))
+
+            # heterogeneous
+        if self.graphon_mode == "piecewise":
+            assert self.group_bounds is not None, "group_bounds must be set for piecewise graphon"
+            bounds = self.group_bounds
+            K = len(bounds) - 1
+    
+                
+            beta_vals = tf.constant(self.beta, dtype=tf.float64)
+    
+            def find_group(z):
+                for k in range(K - 1):
+                    if bounds[k] <= z < bounds[k + 1]:
+                        return k
+                return K - 1
+    
+            ids_np = np.asarray(id_, dtype=float)
+    
+            for i in range(n_samples):
+                xi = float(ids_np[0, i])   # agent i's index in [0,1]
+                g = find_group(xi)         # group index
+                beta_vector[i, 0].assign(beta_vals[g])
+    
+            return tf.convert_to_tensor(beta_vector)
+    
+            # Constnat
+        else:
+            
+            if isinstance(self.beta, (list, tuple, np.ndarray)):
+                beta0 = float(self.beta[0]) # Take the first element if not constant
             else:
-                beta_vector[i] = self.beta[1]
-        return beta_vector
+                beta0 = float(self.beta)
+    
+            beta_scalar = tf.cast(beta0, tf.float64)
+            beta_vector.assign(beta_scalar)
+            return tf.convert_to_tensor(beta_vector)
+
+
+    
+
 
     # ========== MODEL
 
@@ -135,11 +207,22 @@ class SolverODE:
         start_time = time.time()
         # SAMPLE INITIAL POINTS
         self.id_ = self.id_creator(n_samples)
+        #print("DEBUG graphon_mode:", self.graphon_mode)
         self.X0 = tf.cast(self.sample_x0(n_samples, self.id_), tf.float64)
         #self.W =  tf.reshape([self.individual_graphon(n_samples, self.X0[a, self.Nstates]) for a in np.arange(n_samples)],[n_samples,n_samples])
         ids = self.X0[:, self.Nstates].numpy()   # convert to numpy only once
-        Wrows = [ self.individual_graphon(n_samples, a) for a in ids ]
-        self.W = tf.constant(Wrows, dtype=tf.float64)
+        #Wrows = [ self.individual_graphon(n_samples, a) for a in ids ]
+        #self.W = tf.constant(Wrows, dtype=tf.float64)
+        Wrows = []
+        for idx, a in enumerate(ids):
+            row = self.individual_graphon(n_samples, a)
+            # DEBUG: inspect each row
+            #print(f"DEBUG Wrow {idx}: type={type(row)}, shape={row.shape}")
+            Wrows.append(tf.reshape(row, (n_samples,)))  # force 1-D
+        
+        # stack rows into (n_samples, n_samples)
+        self.W = tf.stack(Wrows, axis=0)  # shape: (n_samples, n_samples)
+        #print("DEBUG W shape:", self.W.shape)
 
         self.beta_vector= self.beta_creator(n_samples, self.id_)
 
