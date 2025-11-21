@@ -3,14 +3,14 @@ solver:
 
   # initial condition
   I0: 0.1
-  R0: 0.4
+  R0: 0.0
   # S0 = 1 - I0 - R0 (computed in Python)
   T: 40.0
   Nstates: 3
 
   batch_size: 100
   valid_size: 200
-  n_maxstep: 1000
+  n_maxstep: 10000 #
     
   n_displaystep: 5
   n_savetofilestep: 10
@@ -21,7 +21,7 @@ solver:
 
 
   # epidemiological parameters (passed to FBODE)
-  beta: [0.4, 0.4, 0.3]            # 3 values since Nstates = 3
+  beta: [0.4, 0.4, 0.3]           
   gamma: 0.1
   lambda1: 1.0
   lambda2: 0.9
@@ -29,22 +29,19 @@ solver:
   alpha_I_pop: 0.9                 # = lambda2
   cost_I: 1.0
   cost_lambda1: 10.0
-  kappa: 0.0
+  kappa: 0.0 #reinfection
 
   g: 0.2
   Delta_t: 0.05
 
 graphon:
-  graphon_mode: piecewise #constant/powerlaw/star/piecewise
+  graphon_mode: piecewise #constant/powerlaw/piecewise
 
   constant:
     p: 0.3
 
   powerlaw: 
     g: 0.2
-
-  star:
-    hub_threshold: 0.05
 
   piecewise:
     group_bounds: [0.0, 0.4, 0.6, 1.0]
