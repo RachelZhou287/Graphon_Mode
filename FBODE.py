@@ -30,7 +30,7 @@ class FBODEEquation(object):
         I = tf.reshape(P[:,1], (n_samples,1))
         R = tf.reshape(P[:,2], (n_samples,1))
         
-        dS = -beta_vector * ALPHA * Z_empirical * S + self.kappa * R
+        dS = -beta_vector * ALPHA * Z_empirical * S + self.kappa * R #beta: number: jump rate for one person 
         dI =  beta_vector * ALPHA * Z_empirical * S - self.gamma * I
         dR =  self.gamma * I - self.kappa * R
         
